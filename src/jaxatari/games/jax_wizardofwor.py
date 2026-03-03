@@ -292,6 +292,21 @@ class JaxWizardOfWor(JaxEnvironment[WizardOfWorState, WizardOfWorObservation, Wi
         if reward_funcs is not None:
             reward_funcs = tuple(reward_funcs)
         self.reward_funcs = reward_funcs
+        
+        # using the standard ALE Discrete(10) mapping instead of the old 6-action placeholder
+        # so this actually passes the environment compatibility checks and gym API validation.
+        self.action_set = jnp.array([
+            Action.NOOP,
+            Action.FIRE,
+            Action.UP,
+            Action.RIGHT,
+            Action.LEFT,
+            Action.DOWN,
+            Action.UPFIRE,
+            Action.RIGHTFIRE,
+            Action.LEFTFIRE,
+            Action.DOWNFIRE
+        ])
 
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, key=None) -> Tuple[WizardOfWorObservation, WizardOfWorState]:
@@ -377,7 +392,7 @@ class JaxWizardOfWor(JaxEnvironment[WizardOfWorState, WizardOfWorObservation, Wi
 
     def action_space(self) -> spaces.Discrete:
         """Returns the action space of the game."""
-        return spaces.Discrete(6)  # Platzhalter
+        return spaces.Discrete(len(self.action_set))  # ALE Discrete(10) mapping
 
     def image_space(self) -> spaces.Box:
         """Returns the image space of the game."""
