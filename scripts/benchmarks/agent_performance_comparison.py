@@ -26,10 +26,7 @@ try:
         normalize_observation_jaxatari
     )
 
-    from jaxatari.games.jax_pong import JaxPong
-    from jaxatari.games.jax_pong import PongRenderer as JaxPongRenderer
-    from jaxatari.wrappers import AtariWrapper, FlattenObservationWrapper
-    import jaxatari.rendering.jax_rendering_utils as jax_rendering_utils
+    from jaxatari.wrappers import AtariWrapper, FlattenObservationWrapper, PixelObsWrapper
 
 except ImportError as e:
     print(f"Error importing modules: {e}")
@@ -51,50 +48,187 @@ SCALING_FACTOR = 3
 WIDTH = 160  # Standard Atari game width
 HEIGHT = 210  # Standard Atari game height
 
-# Check if GPU is available and set it as the default device
-if jax.devices('gpu'):
-    jax.config.update('jax_platform_name', 'gpu')
-    print("Using GPU for training")
-else:
-    print("No GPU found, using CPU")
+# Check if GPU backend is available and set it as the default device.
+# jax.devices("gpu") raises on CPU-only setups, so guard it safely.
+try:
+    gpu_devices = jax.devices("gpu")
+except RuntimeError:
+    gpu_devices = []
 
-# --- PPO Configuration (aligns with keys used in the new agent script) ---
-ppo_config_distrax = {
-    "ENV_NAME_OCATARI": "Pong", # Specific key for OCAtari env name
-    "ENV_NAME_JAXATARI": "pong", # Specific key for JAXAtari env name
-    "ENV_TYPE": "ocatari", # Can be "ocatari" or "jaxatari"
+if gpu_devices:
+    jax.config.update("jax_platform_name", "gpu")
+    print(f"Using GPU for training ({len(gpu_devices)} device(s))")
+else:
+    print("No GPU backend found, using CPU")
+
+# --- PPO Configuration Presets (Wizard of Wor report protocol) ---
+base_wizard_config = {
+    "ENV_NAME_OCATARI": "Pong",  # kept for OCAtari compatibility paths
+    "ENV_NAME_JAXATARI": "wizardofwor",
+    "ENV_TYPE": "jax",  # Can be "ocatari", "jax", or "jaxatari"
     "TOTAL_TIMESTEPS": 20_000_000,
     "TOTAL_TIMESTEPS_PER_EPOCH": 10_000,
-    "LR": 5e-4,               # Learning rate
-    "NUM_ENVS": 128,              # Number of parallel environments
-    "NUM_STEPS": 256,           # Steps per environment per rollout (batch size for actor)
-    "GAMMA": 0.99,              # Discount factor
-    "GAE_LAMBDA": 0.95,         # GAE lambda
-    "NUM_MINIBATCHES": 16,       # Number of minibatches for PPO update
-    "UPDATE_EPOCHS": 10,         # Number of epochs for PPO update
-    "CLIP_EPS": 0.2,            # PPO clip parameter
-    "CLIP_VF_EPS": 0.2,         # PPO clip for value function (optional, if different from CLIP_EPS)
-    "ENT_COEF": 0.01,           # Entropy coefficient
-    "VF_COEF": 0.5,             # Value function coefficient
-    "MAX_GRAD_NORM": 0.5,       # Max gradient norm for clipping
-    "ACTIVATION": "relu",       # Activation function in network ("tanh" or "relu")
-    "ANNEAL_LR": True,          # Whether to linearly anneal learning rate
+    "LR": 3e-4,
+    "NUM_ENVS": 64,
+    "NUM_STEPS": 256,
+    "GAMMA": 0.99,
+    "GAE_LAMBDA": 0.95,
+    "NUM_MINIBATCHES": 8,
+    "UPDATE_EPOCHS": 3,
+    "CLIP_EPS": 0.1,
+    "CLIP_VF_EPS": 0.1,
+    "ENT_COEF": 0.005,
+    "VF_COEF": 0.5,
+    "MAX_GRAD_NORM": 0.5,
+    "ACTIVATION": "relu",
+    "ANNEAL_LR": True,
     "SEED": 42,
-    
     "BUFFER_WINDOW": 4,
     "FRAMESKIP": 4,
     "REPEAT_ACTION_PROBABILITY": 0.25,
-
-    "LOG_INTERVAL_UPDATES": 20, # Log every 20 PPO updates
-    "VISUALIZE_AFTER_TRAINING": False, 
+    "JAX_OBS_MODE": "object",  # "object" or "pixel"
+    "PIXEL_GRAYSCALE": True,
+    "PIXEL_RESIZE": True,
+    "PIXEL_RESIZE_SHAPE": (84, 84),
+    "LOG_INTERVAL_UPDATES": 100,
+    "VISUALIZE_AFTER_TRAINING": False,
     "VIZ_STEPS": 1000,
-    "VIZ_FPS": 30, # FPS for visualization
+    "VIZ_FPS": 30,
     "SAVE_VIZ_VIDEO": True,
+    "USE_WANDB": True,
+    "WANDB_PROJECT": "jaxatari-wizardofwor-ppo",
+    "WANDB_ENTITY": None,
+    "WANDB_MODE": "online",
+    "WANDB_RUN_NAME": None,
+    "WANDB_GROUP": "wizardofwor",
+    "WANDB_TAGS": ["ppo", "jaxatari", "wizardofwor"],
 }
 
+config_wizard_object_final = {
+    **base_wizard_config,
+    "TOTAL_TIMESTEPS": 200_000_000,
+    "UPDATE_EPOCHS": 3,
+    "JAX_OBS_MODE": "object",
+    "LOG_INTERVAL_UPDATES": 100,
+    "WANDB_GROUP": "wizardofwor_object_final",
+    "WANDB_TAGS": ["ppo", "jaxatari", "wizardofwor", "object", "final"],
+}
+
+config_wizard_pixel_final = {
+    **base_wizard_config,
+    "TOTAL_TIMESTEPS": 100_000_000,
+    "UPDATE_EPOCHS": 1,
+    "JAX_OBS_MODE": "pixel",
+    "NUM_ENVS": 128,
+    "NUM_STEPS": 128,
+    "NUM_MINIBATCHES": 32,
+    "TEST_NUM_ENVS": 128,  # For compatibility with external notes; not used in this PPO pipeline.
+    "LOG_INTERVAL_UPDATES": 100,
+    "PIXEL_GRAYSCALE": True,
+    "PIXEL_RESIZE": True,
+    "PIXEL_RESIZE_SHAPE": (84, 84),
+    "WANDB_GROUP": "wizardofwor_pixel_final",
+    "WANDB_TAGS": ["ppo", "jaxatari", "wizardofwor", "pixel", "final"],
+}
+
+# Mac-safe final presets: keep report-required timesteps/epochs, reduce parallelism
+# to lower sustained RAM/CPU pressure for long overnight runs.
+config_wizard_object_final_macsafe = {
+    **config_wizard_object_final,
+    "NUM_ENVS": 32,
+    "NUM_STEPS": 128,
+    "NUM_MINIBATCHES": 8,
+    "LOG_INTERVAL_UPDATES": 200,
+    "WANDB_GROUP": "wizardofwor_object_final_macsafe",
+    "WANDB_TAGS": ["ppo", "jaxatari", "wizardofwor", "object", "final", "macsafe"],
+}
+
+config_wizard_pixel_final_macsafe = {
+    **config_wizard_pixel_final,
+    "NUM_ENVS": 16,
+    "NUM_STEPS": 128,
+    "NUM_MINIBATCHES": 4,
+    "TEST_NUM_ENVS": 16,  # compatibility field; not used in this PPO pipeline.
+    "LOG_INTERVAL_UPDATES": 200,
+    "WANDB_GROUP": "wizardofwor_pixel_final_macsafe",
+    "WANDB_TAGS": ["ppo", "jaxatari", "wizardofwor", "pixel", "final", "macsafe"],
+}
+
+config_wizard_object_test = {
+    **config_wizard_object_final,
+    "TOTAL_TIMESTEPS": 20_000_000,
+    "UPDATE_EPOCHS": 3,
+    "LOG_INTERVAL_UPDATES": 10,  # 10x smaller than final to keep similar point density
+    "WANDB_GROUP": "wizardofwor_object_test",
+    "WANDB_TAGS": ["ppo", "jaxatari", "wizardofwor", "object", "test10pct"],
+}
+
+config_wizard_pixel_test = {
+    **config_wizard_pixel_final,
+    "TOTAL_TIMESTEPS": 10_000_000,
+    "UPDATE_EPOCHS": 1,
+    "TEST_NUM_ENVS": 128,  # For compatibility with external notes; not used in this PPO pipeline.
+    "LOG_INTERVAL_UPDATES": 10,  # 10x smaller than final to keep similar point density
+    "WANDB_GROUP": "wizardofwor_pixel_test",
+    "WANDB_TAGS": ["ppo", "jaxatari", "wizardofwor", "pixel", "test10pct"],
+}
+
+CONFIG_PRESETS = {
+    "config_wizard_object_final": config_wizard_object_final,
+    "config_wizard_pixel_final": config_wizard_pixel_final,
+    "config_wizard_object_final_macsafe": config_wizard_object_final_macsafe,
+    "config_wizard_pixel_final_macsafe": config_wizard_pixel_final_macsafe,
+    "config_wizard_object_test": config_wizard_object_test,
+    "config_wizard_pixel_test": config_wizard_pixel_test,
+    # Optional short aliases
+    "wizard_object_final": config_wizard_object_final,
+    "wizard_pixel_final": config_wizard_pixel_final,
+    "wizard_object_final_macsafe": config_wizard_object_final_macsafe,
+    "wizard_pixel_final_macsafe": config_wizard_pixel_final_macsafe,
+    "wizard_object_test": config_wizard_object_test,
+    "wizard_pixel_test": config_wizard_pixel_test,
+}
+
+
+def _is_jax_env_type(env_type: str) -> bool:
+    return env_type in {"jax", "jaxatari"}
+
+
+def _resolve_env_name(config_dict: Dict[str, Any], env_type: str) -> str:
+    if _is_jax_env_type(env_type):
+        return config_dict["ENV_NAME_JAXATARI"]
+    return config_dict["ENV_NAME_OCATARI"]
+
+
+def _build_wrapped_jax_env(config_dict: Dict[str, Any], env_name: str):
+    env_base = jaxatari.make(env_name.lower())
+    env = AtariWrapper(
+        env_base,
+        sticky_actions=True,
+        frame_stack_size=config_dict["BUFFER_WINDOW"],
+        frame_skip=config_dict["FRAMESKIP"],
+    )
+    obs_mode = config_dict.get("JAX_OBS_MODE", "object").lower()
+    if obs_mode == "object":
+        env = ObjectCentricWrapper(env)
+        env = FlattenObservationWrapper(env)
+    elif obs_mode == "pixel":
+        env = PixelObsWrapper(
+            env,
+            do_pixel_resize=config_dict.get("PIXEL_RESIZE", True),
+            pixel_resize_shape=tuple(config_dict.get("PIXEL_RESIZE_SHAPE", (84, 84))),
+            grayscale=config_dict.get("PIXEL_GRAYSCALE", True),
+        )
+        env = FlattenObservationWrapper(env)
+    else:
+        raise ValueError(
+            f"Unsupported JAX_OBS_MODE='{obs_mode}'. Use 'object' or 'pixel'."
+        )
+    return env_base, env
+
 def train_ppo_agent_ocatari(config_dict: Dict[str, Any]) -> Tuple[TrainState, str, Dict[str, Any]]:
-    env_type = config_dict.get("ENV_TYPE", "ocatari")
-    env_name = config_dict["ENV_NAME_OCATARI"] if env_type == "ocatari" else "Pong"
+    env_type = "ocatari"
+    env_name = config_dict["ENV_NAME_OCATARI"]
     
     print(f"Training PPO agent (Distrax base) with {env_type.upper()} environment (Game: {env_name})...")
     
@@ -131,8 +265,10 @@ def train_ppo_agent_ocatari(config_dict: Dict[str, Any]) -> Tuple[TrainState, st
 
 
 def train_ppo_agent_jaxatari(config_dict: Dict[str, Any]) -> Tuple[TrainState, str, Dict[str, Any]]:
-    env_type = config_dict.get("ENV_TYPE", "jaxatari")
-    env_name = config_dict["ENV_NAME_JAXATARI"] if env_type == "jaxatari" else "Pong"
+    env_type = config_dict.get("ENV_TYPE", "jax")
+    if not _is_jax_env_type(env_type):
+        env_type = "jax"
+    env_name = config_dict["ENV_NAME_JAXATARI"]
 
     print(f"Training PPO agent (Distrax base) with {env_type.upper()} environment (Game: {env_name})...")
     
@@ -199,13 +335,13 @@ def evaluate_ppo_agent(
         eval_seed: Random seed for evaluation
         eval_env_type: Override environment type for evaluation ("ocatari" or "jax")
     """
-    env_type = eval_env_type if eval_env_type is not None else config_dict.get("ENV_TYPE", "ocatari")
-    env_name = config_dict["ENV_NAME_OCATARI"] if env_type == "ocatari" else "Pong"
+    env_type = eval_env_type if eval_env_type is not None else config_dict.get("ENV_TYPE", "jax")
+    env_name = _resolve_env_name(config_dict, env_type)
     
     if config_dict.get("BUFFER_WINDOW", None) is None: # fix for old configs
         config_dict["BUFFER_WINDOW"] = config_dict["OCATARI_BUFFER_WINDOW"] 
 
-    if env_type == "ocatari":
+    if not _is_jax_env_type(env_type):
         eval_env = OCAtari(
             env_name=env_name,
             mode="ram", 
@@ -217,22 +353,19 @@ def evaluate_ppo_agent(
             repeat_action_probability=config_dict["REPEAT_ACTION_PROBABILITY"]
         )
     else:  # JAX environment
-        eval_env_base = jaxatari.make(env_name.lower())
-        eval_env = AtariWrapper(eval_env_base, sticky_actions=True, frame_stack_size=config_dict["BUFFER_WINDOW"], frame_skip=config_dict["FRAMESKIP"])
-        eval_env = ObjectCentricWrapper(eval_env)
-        eval_env = FlattenObservationWrapper(eval_env)
+        _, eval_env = _build_wrapped_jax_env(config_dict, env_name)
 
     episode_rewards = []
     
     # Determine obs_shape_flat and action_dim for initializing network if loading params
-    if env_type == "ocatari":
+    if not _is_jax_env_type(env_type):
         _obs_temp, _ = eval_env.reset(seed=eval_seed)
         obs_shape_flat_eval = (np.prod(_obs_temp.shape),)
         action_dim_eval = eval_env.action_space.n
     else:
         _obs_temp, _ = eval_env.reset(key=jax.random.PRNGKey(eval_seed))
         obs_shape_flat_eval = (np.prod(_obs_temp.shape),)
-        action_dim_eval = eval_env._env.action_space().n
+        action_dim_eval = eval_env.action_space().n
 
     if isinstance(agent_representation, str):
         print(f"Loading PPO (Distrax) model params from: {agent_representation}")
@@ -251,7 +384,7 @@ def evaluate_ppo_agent(
     eval_rng_key = jax.random.PRNGKey(eval_seed)
 
     for episode in tqdm(range(num_episodes), desc="Evaluating Episodes", unit="ep"):
-        if env_type == "ocatari":
+        if not _is_jax_env_type(env_type):
             obs_stacked, _ = eval_env.reset(seed=eval_seed + episode)
             obs_norm_flat = normalize_observation_ocatari(obs_stacked).reshape(1, -1)
         else:
@@ -267,7 +400,7 @@ def evaluate_ppo_agent(
             action_agent_jnp = pi_eval.mode()
             action_agent = int(action_agent_jnp[0])
 
-            if env_type == "ocatari":
+            if not _is_jax_env_type(env_type):
                 next_obs_stacked, reward, terminated, truncated, _ = eval_env.step(action_agent)
                 next_obs_norm_flat = normalize_observation_ocatari(next_obs_stacked).reshape(1, -1)
                 done = terminated or truncated
@@ -285,7 +418,7 @@ def evaluate_ppo_agent(
         episode_rewards.append(episode_reward)
         print(f"Evaluation Episode {episode + 1}/{num_episodes}, Reward: {episode_reward:.2f}")
     
-    if env_type == "ocatari":
+    if not _is_jax_env_type(env_type):
         eval_env.close()
         
     mean_reward = np.mean(episode_rewards) if episode_rewards else 0
@@ -394,8 +527,8 @@ def visualize_agent(agent_path: str, config_dict: Dict[str, Any], num_episodes: 
         config_dict: Configuration dictionary
         num_episodes: Number of episodes to visualize
     """
-    env_type = config_dict.get("ENV_TYPE", "ocatari")
-    env_name = config_dict["ENV_NAME_OCATARI"] if env_type == "ocatari" else "Pong"
+    env_type = config_dict.get("ENV_TYPE", "jax")
+    env_name = _resolve_env_name(config_dict, env_type)
     
     if config_dict.get("BUFFER_WINDOW", None) is None: # fix for old configs
         config_dict["BUFFER_WINDOW"] = config_dict["OCATARI_BUFFER_WINDOW"] 
@@ -407,24 +540,30 @@ def visualize_agent(agent_path: str, config_dict: Dict[str, Any], num_episodes: 
     clock = pygame.time.Clock()
     
     # Initialize video recording
-    import cv2
-    import os
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    video_filename = f"agent_visualization_{env_name}_{timestamp}.mp4"
-    try:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(video_filename, fourcc, config_dict.get("VIZ_FPS", 30), 
-                                     (WIDTH * SCALING_FACTOR, HEIGHT * SCALING_FACTOR))
-    except Exception as e:
-        print(f"Could not initialize video writer: {e}. Video will not be saved.")
-        video_writer = None
+    video_writer = None
+    cv2 = None
+    if config_dict.get("SAVE_VIZ_VIDEO", True):
+        import cv2 as _cv2
+        cv2 = _cv2
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_filename = f"agent_visualization_{env_name}_{timestamp}.mp4"
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video_writer = cv2.VideoWriter(
+                video_filename,
+                fourcc,
+                config_dict.get("VIZ_FPS", 30),
+                (WIDTH * SCALING_FACTOR, HEIGHT * SCALING_FACTOR),
+            )
+        except Exception as e:
+            print(f"Could not initialize video writer: {e}. Video will not be saved.")
+            video_writer = None
     
     # Load the agent
     loaded_params = load_ppo_params_from_npz(agent_path)
     
     # Initialize environment
-    if env_type == "ocatari":
+    if not _is_jax_env_type(env_type):
         vis_env = OCAtari(
             env_name=env_name,
             mode="ram", 
@@ -438,12 +577,9 @@ def visualize_agent(agent_path: str, config_dict: Dict[str, Any], num_episodes: 
         obs_shape_flat = (np.prod(vis_env.observation_space.shape),)
         action_dim = vis_env.action_space.n
     else:  # JAX environment
-        vis_env_base = jaxatari.make(env_name.lower())
-        vis_env = AtariWrapper(vis_env_base, sticky_actions=True, frame_stack_size=config_dict["BUFFER_WINDOW"], frame_skip=config_dict["FRAMESKIP"])
-        vis_env = ObjectCentricWrapper(vis_env)
-        vis_env = FlattenObservationWrapper(vis_env)
+        vis_env_base, vis_env = _build_wrapped_jax_env(config_dict, env_name)
         obs_shape_flat = vis_env.reset(key=jax.random.PRNGKey(0))[0].shape
-        action_dim = vis_env._env.action_space().n
+        action_dim = vis_env.action_space().n
     
     # Initialize agent
     dummy_rng = jax.random.PRNGKey(0)
@@ -453,7 +589,7 @@ def visualize_agent(agent_path: str, config_dict: Dict[str, Any], num_episodes: 
     # Initialize visualization
     agent_key = jax.random.PRNGKey(config_dict["SEED"] + 777)
     
-    if env_type == "ocatari":
+    if not _is_jax_env_type(env_type):
         obs_viz, _ = vis_env.reset(seed=config_dict["SEED"])
         print(obs_viz)
         obs_viz_norm_flat = normalize_observation_ocatari(obs_viz).reshape(1, -1)
@@ -483,7 +619,7 @@ def visualize_agent(agent_path: str, config_dict: Dict[str, Any], num_episodes: 
         action_viz = pi_viz.mode()  # Use mode for deterministic visualization
         
         # Step environment
-        if env_type == "ocatari":
+        if not _is_jax_env_type(env_type):
             next_obs_viz, reward_viz, terminated, truncated, _ = vis_env.step(int(action_viz[0]))
             next_obs_viz_norm_flat = normalize_observation_ocatari(next_obs_viz).reshape(1, -1)
             done_viz = terminated or truncated
@@ -509,14 +645,26 @@ def visualize_agent(agent_path: str, config_dict: Dict[str, Any], num_episodes: 
                 state_viz, action_viz[0] if action_viz.ndim > 0 else action_viz
             )
             next_obs_viz_norm_flat = normalize_observation_jaxatari(next_obs_viz_raw, vis_env.observation_space()).reshape(1, -1)
-            # Render the game state using JaxPongRenderer directly
+            # Render the active JAXAtari game state
             raster = vis_env_base.render(state_viz.env_state)
-            # Update pygame display with the rendered frame 
-            jax_rendering_utils.update_pygame(pygame_screen, raster, SCALING_FACTOR, WIDTH, HEIGHT)
+            raster_np = np.asarray(raster)
+            if raster_np.dtype != np.uint8:
+                raster_np = np.clip(raster_np, 0, 255).astype(np.uint8)
+            if raster_np.ndim == 3 and raster_np.shape[-1] == 4:
+                raster_np = raster_np[..., :3]
+
+            frame_transposed = np.transpose(raster_np, (1, 0, 2))
+            frame_surface = pygame.Surface(frame_transposed.shape[:2])
+            pygame.pixelcopy.array_to_surface(frame_surface, frame_transposed)
+            frame_surface_scaled = pygame.transform.scale(
+                frame_surface, (WIDTH * SCALING_FACTOR, HEIGHT * SCALING_FACTOR)
+            )
+            pygame_screen.blit(frame_surface_scaled, (0, 0))
+            pygame.display.flip()
             
             # Save frame to video
             if video_writer:
-                view = pygame.surfarray.array3d(pygame_screen)
+                view = pygame.surfarray.array3d(frame_surface_scaled)
                 view = view.transpose([1, 0, 2])
                 frame_bgr = cv2.cvtColor(view, cv2.COLOR_RGB2BGR)
                 video_writer.write(frame_bgr)
@@ -529,7 +677,7 @@ def visualize_agent(agent_path: str, config_dict: Dict[str, Any], num_episodes: 
             episode_count += 1
             total_reward_viz = 0
             
-            if env_type == "ocatari":
+            if not _is_jax_env_type(env_type):
                 obs_viz, _ = vis_env.reset(seed=config_dict["SEED"] + episode_count)
                 obs_viz_norm_flat = normalize_observation_ocatari(obs_viz).reshape(1, -1)
                 current_frame = vis_env.render()
@@ -543,7 +691,7 @@ def visualize_agent(agent_path: str, config_dict: Dict[str, Any], num_episodes: 
         video_writer.release()
         print(f"\nVideo saved as: {os.path.abspath(video_filename)}")
     
-    if env_type == "ocatari":
+    if not _is_jax_env_type(env_type):
         vis_env.close()
     pygame.quit()
     print("Visualization finished.")
@@ -553,18 +701,22 @@ def main():
     parser = argparse.ArgumentParser(description='Script to compare PPO agents trained on either OCAtari or JAXAtari')
     parser.add_argument('--mode', type=str, choices=['train-ocatari', 'train-jaxatari', 'eval', 'visualize', 'compare'], required=True,
                       help='Mode: train-ocatari, train-jaxatari, eval, or compare agents')
-    parser.add_argument('--env_type', type=str, choices=['ocatari', 'jax'], default='ocatari',
-                      help='Environment type for training/evaluation')
+    parser.add_argument('--preset', type=str, choices=sorted(CONFIG_PRESETS.keys()), default='config_wizard_object_test',
+                      help='Configuration preset to load')
+    parser.add_argument('--env_type', type=str, choices=['ocatari', 'jax', 'jaxatari'], default=None,
+                      help='Optional override for environment type')
     parser.add_argument('--model_path', type=str, help='Path to model parameters for evaluation')
     parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes for evaluation')
     parser.add_argument('--compare_paths', type=str, nargs='+', help='Paths to models for comparison')
     
     args = parser.parse_args()
     
-    current_config = ppo_config_distrax.copy()
-    current_config["ENV_TYPE"] = args.env_type
+    current_config = CONFIG_PRESETS[args.preset].copy()
+    if args.env_type is not None:
+        current_config["ENV_TYPE"] = args.env_type
     
     if args.mode == "train-ocatari":
+        current_config["ENV_TYPE"] = "ocatari"
         print(f"--- Starting PPO (Distrax base) Agent Training ({current_config['ENV_TYPE']}) ---")
         print(f"Configuration: {current_config}")
         
@@ -580,13 +732,15 @@ def main():
         print(f"Trained Agent - Mean Reward: {mean_reward:.2f} ± {std_reward:.2f}")
         
     elif args.mode == "train-jaxatari":
+        if not _is_jax_env_type(current_config.get("ENV_TYPE", "jax")):
+            current_config["ENV_TYPE"] = "jax"
         print(f"--- Starting PPO (Distrax base) Agent Training ({current_config['ENV_TYPE']}) ---")
         print(f"Configuration: {current_config}")
         
         trained_ppo_state_obj, ppo_results_dir, training_metrics = train_ppo_agent_jaxatari(current_config)
 
         plots_path = os.path.join(ppo_results_dir, "training_plots_ppo_distrax.png")
-        plot_training_metrics(training_metrics, plots_path, current_config['ENV_NAME_OCATARI'])
+        plot_training_metrics(training_metrics, plots_path, current_config['ENV_NAME_JAXATARI'])
         
         print("\n--- Evaluating trained agent ---")
         mean_reward, std_reward = evaluate_ppo_agent(

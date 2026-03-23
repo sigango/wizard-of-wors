@@ -11,7 +11,22 @@ GAME_MODULES = {
     "kangaroo": "jaxatari.games.jax_kangaroo",
     "freeway": "jaxatari.games.jax_freeway",
     "breakout": "jaxatari.games.jax_breakout",
+    "wizardofwor": "jaxatari.games.jax_wizardofwor",
+    "wizard_of_wor": "jaxatari.games.jax_wizardofwor",
     # Add new games here
+}
+
+# Mod modules registry (for centralized game/mod bookkeeping in benchmark scripts).
+# This branch does not currently apply mods in `make`, but this registry keeps
+# available mod controllers discoverable in one place.
+MOD_MODULES = {
+    "pong": "jaxatari.games.mods.pong_mods.PongEnvMod",
+    "kangaroo": "jaxatari.games.mods.kangaroo_mods.KangarooEnvMod",
+    "freeway": "jaxatari.games.mods.freeway_mods.FreewayEnvMod",
+    "breakout": "jaxatari.games.mods.breakout_mods.BreakoutEnvMod",
+    "seaquest": "jaxatari.games.mods.seaquest_mods.SeaquestEnvMod",
+    # Add Wizard Of Wor custom mods here once a controller module exists, e.g.:
+    # "wizardofwor": "jaxatari.games.mods.wizardofwor_mods.WizardOfWorEnvMod",
 }
 
 def list_available_games() -> list[str]:

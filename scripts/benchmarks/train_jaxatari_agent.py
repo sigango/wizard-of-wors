@@ -15,22 +15,73 @@ import pygame
 from functools import partial
 
 import jaxatari
-from jaxatari.wrappers import AtariWrapper, FlattenObservationWrapper, ObjectCentricWrapper, PixelAndObjectCentricWrapper
+from jaxatari.wrappers import (
+    AtariWrapper,
+    FlattenObservationWrapper,
+    ObjectCentricWrapper,
+    PixelObsWrapper,
+    PixelAndObjectCentricWrapper,
+)
 import jaxatari.games.jax_pong as jax_pong
 import jaxatari.spaces as spaces
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 
 def normalize_observation_jaxatari(obs: jnp.ndarray, obs_space: spaces.Space) -> jnp.ndarray:
     # assuming the obs space is flattened at this point, get the max values for each feature
-    max_values = obs_space.high.flatten()
-    min_values = obs_space.low.flatten()
+    max_values = jnp.asarray(obs_space.high).flatten()
+    min_values = jnp.asarray(obs_space.low).flatten()
+    value_range = max_values - min_values
+    value_range = jnp.where(value_range == 0, 1.0, value_range)
 
-    num_features_per_frame = len(max_values)
-    num_frames = obs.shape[-1] // num_features_per_frame
-    max_values = jnp.tile(max_values, num_frames)
-    min_values = jnp.tile(min_values, num_frames)
+    # If observations contain repeated frame-wise feature blocks, tile bounds accordingly.
+    if obs.shape[-1] == max_values.shape[0]:
+        scaled_max_values = max_values
+        scaled_min_values = min_values
+        scaled_ranges = value_range
+    elif obs.shape[-1] % max_values.shape[0] == 0:
+        num_repeats = obs.shape[-1] // max_values.shape[0]
+        scaled_max_values = jnp.tile(max_values, num_repeats)
+        scaled_min_values = jnp.tile(min_values, num_repeats)
+        scaled_ranges = jnp.tile(value_range, num_repeats)
+    else:
+        raise ValueError(
+            f"Cannot normalize observation with shape {obs.shape}; "
+            f"obs_space has {max_values.shape[0]} features."
+        )
 
-    return 2* ((obs - min_values)/(max_values-min_values)) - 1.0
+    return 2 * ((obs - scaled_min_values) / scaled_ranges) - 1.0
+
+
+def _build_wrapped_jaxatari_env(game_name: str, config: Dict[str, Any]):
+    obs_mode = config.get("JAX_OBS_MODE", "object").lower()
+    env = jaxatari.make(game_name)
+    env = AtariWrapper(
+        env,
+        sticky_actions=True,
+        frame_stack_size=config["BUFFER_WINDOW"],
+        frame_skip=config["FRAMESKIP"],
+    )
+    if obs_mode == "object":
+        env = ObjectCentricWrapper(env)
+        env = FlattenObservationWrapper(env)
+    elif obs_mode == "pixel":
+        env = PixelObsWrapper(
+            env,
+            do_pixel_resize=config.get("PIXEL_RESIZE", True),
+            pixel_resize_shape=tuple(config.get("PIXEL_RESIZE_SHAPE", (84, 84))),
+            grayscale=config.get("PIXEL_GRAYSCALE", True),
+        )
+        env = FlattenObservationWrapper(env)
+    else:
+        raise ValueError(
+            f"Unsupported JAX_OBS_MODE='{obs_mode}'. Use 'object' or 'pixel'."
+        )
+    return env
 
 
 def env_step(env_step_fn, state, action, agent_key):
@@ -185,11 +236,13 @@ def train_ppo_with_jaxatari(config: Dict[str, Any]):
     np.random.seed(config["SEED"]) 
     main_rng = jax.random.PRNGKey(config["SEED"])
 
-    game_name = config["ENV_NAME_JAXATARI"] 
-
-    if game_name != "pong":
-        # TODO: change the core to support other games
-        raise ValueError(f"Game {game_name} is not supported for PPO training right now.")
+    game_name = config["ENV_NAME_JAXATARI"].lower()
+    available_games = set(jaxatari.core.list_available_games())
+    if game_name not in available_games:
+        raise ValueError(
+            f"Game '{game_name}' is not registered in jaxatari.core. "
+            f"Available games: {sorted(available_games)}"
+        )
 
     buffer_window = config["BUFFER_WINDOW"]
     
@@ -200,14 +253,28 @@ def train_ppo_with_jaxatari(config: Dict[str, Any]):
         config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
     )
 
+    use_wandb = bool(config.get("USE_WANDB", False))
+    if use_wandb and wandb is None:
+        raise ImportError(
+            "WandB logging is enabled (USE_WANDB=True), but `wandb` is not installed. "
+            "Install with `pip install wandb`."
+        )
+    if use_wandb:
+        wandb.init(
+            project=config.get("WANDB_PROJECT", "jaxatari-ppo"),
+            entity=config.get("WANDB_ENTITY"),
+            name=config.get("WANDB_RUN_NAME"),
+            group=config.get("WANDB_GROUP"),
+            tags=config.get("WANDB_TAGS"),
+            mode=config.get("WANDB_MODE", "online"),
+            config=dict(config),
+        )
+
     print(f"Using JaxAtari environment: {game_name}")
     # create all environments
     envs = []
     for i in range(config["NUM_ENVS"]):
-        env = jaxatari.make(game_name)
-        env: AtariWrapper = AtariWrapper(env, sticky_actions=True, frame_stack_size=buffer_window, frame_skip=config["FRAMESKIP"]) # get the atari wrapper to handle things like frame stacking, sticky actions, etc.
-        env: ObjectCentricWrapper = ObjectCentricWrapper(env) # use the object centric wrapper to only return object centric observations
-        env: FlattenObservationWrapper = FlattenObservationWrapper(env) # flatten the object centric observation to a single vector
+        env = _build_wrapped_jaxatari_env(game_name, config)
         envs.append(env)
 
     # We will use envs[0].step as the representative_env_step_fn
@@ -319,6 +386,7 @@ def train_ppo_with_jaxatari(config: Dict[str, Any]):
             rollout_log_probs = rollout_log_probs.at[step_idx].set(log_probs)
             rollout_rewards = rollout_rewards.at[step_idx].set(rewards)
             rollout_dones = rollout_dones.at[step_idx].set(dones)
+            rollout_values = rollout_values.at[step_idx].set(value)
             
             current_obs_stacked_norm_flat = next_obs_norm
             current_batched_env_states = next_batched_env_states
@@ -383,7 +451,7 @@ def train_ppo_with_jaxatari(config: Dict[str, Any]):
             )
             
         if update_idx % config.get("LOG_INTERVAL_UPDATES", 10) == 0:
-            mean_all_rewards = np.mean(list(episode_rewards_deque))
+            mean_all_rewards = np.mean(list(episode_rewards_deque)) if episode_rewards_deque else 0.0
             all_mean_rewards_history.append(mean_all_rewards)
             # Convert JAX arrays to Python values
             loss_float = float(loss)
@@ -401,10 +469,31 @@ def train_ppo_with_jaxatari(config: Dict[str, Any]):
                 "entropy": f"{aux_info_dict['entropy']:.4f}"
             })
 
+            if use_wandb:
+                wandb_metrics = {
+                    "global_step": current_total_steps_log,
+                    "mean_rewards": mean_all_rewards,
+                    "returned_episode_returns": mean_all_rewards,
+                    "pg_loss": aux_info_dict["pg_loss"],
+                    "td_loss": aux_info_dict["vf_loss"],
+                    "vf_loss": aux_info_dict["vf_loss"],
+                    "entropy": aux_info_dict["entropy"],
+                    "total_loss": loss_float,
+                    "episodes_completed": len(all_episode_rewards_history),
+                }
+                if "approx_kl" in aux_info_dict:
+                    wandb_metrics["approx_kl"] = aux_info_dict["approx_kl"]
+                if "clip_fraction" in aux_info_dict:
+                    wandb_metrics["clip_fraction"] = aux_info_dict["clip_fraction"]
+                wandb.log(wandb_metrics, step=current_total_steps_log)
+
         pbar.update(1)
 
     pbar.close()
     print("Training finished.")
+
+    if use_wandb:
+        wandb.finish()
 
     training_results_metrics = {
         "timesteps": all_timesteps_history,
