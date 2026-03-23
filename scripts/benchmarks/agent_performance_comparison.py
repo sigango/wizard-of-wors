@@ -708,12 +708,36 @@ def main():
     parser.add_argument('--model_path', type=str, help='Path to model parameters for evaluation')
     parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes for evaluation')
     parser.add_argument('--compare_paths', type=str, nargs='+', help='Paths to models for comparison')
+    parser.add_argument('--num-envs', type=int, default=None, help='Optional override for NUM_ENVS')
+    parser.add_argument('--num-steps', type=int, default=None, help='Optional override for NUM_STEPS')
+    parser.add_argument('--num-minibatches', type=int, default=None, help='Optional override for NUM_MINIBATCHES')
+    parser.add_argument('--total-steps', type=int, default=None, help='Optional override for TOTAL_TIMESTEPS')
+    parser.add_argument('--update-epochs', type=int, default=None, help='Optional override for UPDATE_EPOCHS')
     
     args = parser.parse_args()
     
     current_config = CONFIG_PRESETS[args.preset].copy()
     if args.env_type is not None:
         current_config["ENV_TYPE"] = args.env_type
+    if args.num_envs is not None:
+        current_config["NUM_ENVS"] = args.num_envs
+    if args.num_steps is not None:
+        current_config["NUM_STEPS"] = args.num_steps
+    if args.num_minibatches is not None:
+        current_config["NUM_MINIBATCHES"] = args.num_minibatches
+    if args.total_steps is not None:
+        current_config["TOTAL_TIMESTEPS"] = args.total_steps
+    if args.update_epochs is not None:
+        current_config["UPDATE_EPOCHS"] = args.update_epochs
+    if (
+        current_config["NUM_ENVS"] * current_config["NUM_STEPS"]
+    ) % current_config["NUM_MINIBATCHES"] != 0:
+        raise ValueError(
+            "Invalid PPO batching: NUM_ENVS * NUM_STEPS must be divisible by "
+            f"NUM_MINIBATCHES. Got {current_config['NUM_ENVS']} * "
+            f"{current_config['NUM_STEPS']} and NUM_MINIBATCHES="
+            f"{current_config['NUM_MINIBATCHES']}."
+        )
     
     if args.mode == "train-ocatari":
         current_config["ENV_TYPE"] = "ocatari"
