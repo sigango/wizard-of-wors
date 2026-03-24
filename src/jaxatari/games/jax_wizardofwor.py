@@ -311,6 +311,7 @@ class JaxWizardOfWor(JaxEnvironment[WizardOfWorState, WizardOfWorObservation, Wi
     @partial(jax.jit, static_argnums=(0,))
     def reset(self, key=None) -> Tuple[WizardOfWorObservation, WizardOfWorState]:
         """Reset the game to the initial state."""
+        reset_key = jax.random.PRNGKey(666) if key is None else key
         state = WizardOfWorState(
             player=EntityPosition(
                 x=self.consts.PLAYER_SPAWN_POSITION[0],
@@ -343,7 +344,7 @@ class JaxWizardOfWor(JaxEnvironment[WizardOfWorState, WizardOfWorObservation, Wi
             lives=self.consts.MAX_LIVES + 1,
             doubled=False,
             frame_counter=0,
-            rng_key=jax.random.PRNGKey(666),  # Initialisiere den RNG
+            rng_key=reset_key,
             level=0,
             game_over=False,
             teleporter=False,
@@ -359,16 +360,23 @@ class JaxWizardOfWor(JaxEnvironment[WizardOfWorState, WizardOfWorObservation, Wi
         :param action: The action taken by the player.
         :return: A tuple containing the new observation, the updated state, the reward, whether the game is done, and additional info.
         """
+        action = jnp.asarray(action, dtype=jnp.int32)
+        mapped_action = jax.lax.cond(
+            jnp.logical_and(action >= 0, action < len(self.action_set)),
+            lambda _: self.action_set[action],
+            lambda _: action,
+            operand=None
+        )
         previous_state = state
         new_state = update_state(
             state=state,
             frame_counter=(state.frame_counter + 1) % 360,
-            rng_key=jax.random.fold_in(state.rng_key, action),
+            rng_key=jax.random.fold_in(state.rng_key, mapped_action),
             # Teleporter is true if the frame_counter is below 180
             teleporter=(state.frame_counter < 180)
         )
         new_state = self._step_level_change(state=new_state)
-        new_state = self._step_player_movement(state=new_state, action=action)
+        new_state = self._step_player_movement(state=new_state, action=mapped_action)
         new_state = self._step_bullet_movement(state=new_state)
         new_state = self._step_enemy_movement(state=new_state)
         new_state = self._step_collision_detection(state=new_state)
@@ -502,11 +510,12 @@ class JaxWizardOfWor(JaxEnvironment[WizardOfWorState, WizardOfWorObservation, Wi
         """Generates the starting enemies for the game."""
 
         def _generate_single_enemy(rng_key) -> chex.Array:
-            x = jax.random.randint(rng_key, shape=(), minval=0, maxval=11) * (
+            key_x, key_y, key_dir = jax.random.split(rng_key, 3)
+            x = jax.random.randint(key_x, shape=(), minval=0, maxval=11) * (
                     self.consts.TILE_SIZE[0] + self.consts.WALL_THICKNESS)
-            y = jax.random.randint(rng_key, shape=(), minval=0, maxval=6) * (
+            y = jax.random.randint(key_y, shape=(), minval=0, maxval=6) * (
                     self.consts.TILE_SIZE[1] + self.consts.WALL_THICKNESS)
-            direction = jax.random.choice(rng_key, jnp.array(
+            direction = jax.random.choice(key_dir, jnp.array(
                 [self.consts.UP, self.consts.DOWN, self.consts.LEFT, self.consts.RIGHT]))
             return jnp.array([x, y, direction, self.consts.ENEMY_BURWOR, 0, 0, 0], dtype=jnp.int32)
 
@@ -1486,11 +1495,12 @@ class JaxWizardOfWor(JaxEnvironment[WizardOfWorState, WizardOfWorObservation, Wi
         score = state.score
 
         def get_random_tile_position(rng_key):
-            x_idx = jax.random.randint(rng_key, shape=(), minval=0, maxval=11)
-            y_idx = jax.random.randint(rng_key, shape=(), minval=0, maxval=6)
+            key_x, key_y, key_dir = jax.random.split(rng_key, 3)
+            x_idx = jax.random.randint(key_x, shape=(), minval=0, maxval=11)
+            y_idx = jax.random.randint(key_y, shape=(), minval=0, maxval=6)
             x = x_idx * (consts.TILE_SIZE[0] + consts.WALL_THICKNESS)
             y = y_idx * (consts.TILE_SIZE[1] + consts.WALL_THICKNESS)
-            direction = jax.random.choice(rng_key, jnp.array([consts.UP, consts.DOWN, consts.LEFT, consts.RIGHT]))
+            direction = jax.random.choice(key_dir, jnp.array([consts.UP, consts.DOWN, consts.LEFT, consts.RIGHT]))
             return jnp.array([x, y, direction, consts.ENEMY_NONE, 0, 0, 0])
 
         def is_dead(enemy):
@@ -1552,7 +1562,7 @@ class JaxWizardOfWor(JaxEnvironment[WizardOfWorState, WizardOfWorObservation, Wi
                             ),
                             lambda: jax.lax.cond(
                                 ((enemy[3] == consts.ENEMY_WORLUK) & spawn_wizard(rng_key) & (state.level > 1)),
-                                lambda: (get_random_tile_position(rng_key).at[2].set(consts.ENEMY_WIZARD), points),
+                                lambda: (get_random_tile_position(rng_key).at[3].set(consts.ENEMY_WIZARD), points),
                                 lambda: (jnp.array([0, 0, 0, consts.ENEMY_NONE, 0, 0, 0]), points)
                             )
                         )
