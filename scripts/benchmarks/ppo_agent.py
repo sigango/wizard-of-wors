@@ -117,8 +117,15 @@ def ppo_loss_fn(
     targets: jnp.ndarray, 
     config: Dict
 ):
+    traj_batch_action = jnp.ravel(traj_batch_action)
+    traj_batch_log_prob_old = jnp.ravel(traj_batch_log_prob_old)
+    traj_batch_value_old = jnp.ravel(traj_batch_value_old)
+    advantages = jnp.ravel(advantages)
+    targets = jnp.ravel(targets)
+
     pi, value_new = apply_fn({'params': params}, traj_batch_obs)
-    log_prob_new = pi.log_prob(traj_batch_action)
+    log_prob_new = jnp.ravel(pi.log_prob(traj_batch_action))
+    value_new = jnp.ravel(value_new)
 
     clip_vf_eps = config.get("CLIP_VF_EPS", config["CLIP_EPS"])
     value_pred_clipped = traj_batch_value_old + (

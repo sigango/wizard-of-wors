@@ -117,7 +117,7 @@ config_wizard_object_final = {
 config_wizard_pixel_final = {
     **base_wizard_config,
     "TOTAL_TIMESTEPS": 100_000_000,
-    "UPDATE_EPOCHS": 1,
+    "UPDATE_EPOCHS": 4,
     "JAX_OBS_MODE": "pixel",
     "NUM_ENVS": 128,
     "NUM_STEPS": 128,
@@ -166,7 +166,7 @@ config_wizard_object_test = {
 config_wizard_pixel_test = {
     **config_wizard_pixel_final,
     "TOTAL_TIMESTEPS": 10_000_000,
-    "UPDATE_EPOCHS": 1,
+    "UPDATE_EPOCHS": 4,
     "TEST_NUM_ENVS": 128,  # For compatibility with external notes; not used in this PPO pipeline.
     "LOG_INTERVAL_UPDATES": 10,  # 10x smaller than final to keep similar point density
     "WANDB_GROUP": "wizardofwor_pixel_test",
