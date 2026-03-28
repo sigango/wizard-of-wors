@@ -18,7 +18,12 @@ mkdir -p "${MPLCONFIGDIR}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if command -v nvidia-smi >/dev/null 2>&1; then
-  DEFAULT_JAX_PIP_SPEC="jax[cuda13]"
+  CUDA_MAJOR="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9][0-9]*\)\..*/\1/p' | head -n 1 || true)"
+  if [[ "${CUDA_MAJOR}" == "13" ]]; then
+    DEFAULT_JAX_PIP_SPEC="jax[cuda13]"
+  else
+    DEFAULT_JAX_PIP_SPEC="jax[cuda12]"
+  fi
 else
   DEFAULT_JAX_PIP_SPEC="jax"
 fi
@@ -42,6 +47,11 @@ UPDATE_EPOCHS_OVERRIDE=""
 
 NUM_EVAL_EPISODES="${NUM_EVAL_EPISODES:-10}"
 NUM_VIS_EPISODES="${NUM_VIS_EPISODES:-5}"
+RUN_TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
+RESULTS_DIR="${REPO_ROOT}/results"
+RUN_MANIFEST_CSV="${RESULTS_DIR}/wizard_run_manifest_${RUN_TIMESTAMP}.csv"
+RUN_TIMINGS_CSV="${RESULTS_DIR}/wizard_stage_timing_${RUN_TIMESTAMP}.csv"
+REPORT_BUNDLE_DIR="${RESULTS_DIR}/wizardofwor_report_bundle_${RUN_TIMESTAMP}"
 
 usage() {
   cat <<'EOF'
@@ -50,7 +60,7 @@ Usage:
 
 Options:
   --algo ALG             ALG in {ppo,pqn}. Default: ppo.
-  --obs MODE             MODE in {object,pixel}. Default: pixel.
+  --obs MODE             MODE in {object,pixel,both}. Default: pixel.
   --rtx5090              Force non-macsafe final preset for NVIDIA RTX 5090 runs.
   --num-envs N           Override NUM_ENVS for selected preset.
   --num-steps N          Override NUM_STEPS for selected preset.
@@ -59,7 +69,7 @@ Options:
   --update-epochs N      Override UPDATE_EPOCHS for selected preset.
   --quick                Use test preset (10% style run).
   --macsafe              Use macsafe final preset.
-  --with-visualize       Record visualization after training with latest checkpoint.
+  --with-visualize       Record visualization (MP4) after training with latest checkpoint.
   --dry-run              Print commands only.
   --skip-train           Skip training and only run visualization (requires --with-visualize).
   --skip-preflight       Skip dependency checks.
@@ -161,9 +171,9 @@ case "${ALGO}" in
 esac
 
 case "${OBS_MODE}" in
-  object|pixel) ;;
+  object|pixel|both) ;;
   *)
-    echo "Invalid --obs '${OBS_MODE}'. Use object|pixel." >&2
+    echo "Invalid --obs '${OBS_MODE}'. Use object|pixel|both." >&2
     exit 1
     ;;
 esac
@@ -174,6 +184,10 @@ if [[ "${ALGO}" == "pqn" ]]; then
     echo "Use --algo ppo, or add PQN benchmark scripts first." >&2
     exit 2
   fi
+fi
+
+if (( WITH_VIS == 1 )) && [[ -z "${DISPLAY:-}" ]]; then
+  export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}"
 fi
 
 print_report_system_info() {
@@ -269,36 +283,93 @@ if missing:
 PY
 }
 
+jax_runtime_ok() {
+  local expect_gpu="$1"
+  JAX_EXPECT_GPU="${expect_gpu}" "${PYTHON_BIN}" - <<'PY'
+import os
+import sys
+
+expect_gpu = os.environ.get("JAX_EXPECT_GPU", "0") == "1"
+try:
+    import jax
+    backend = jax.default_backend()
+    devices = [d.platform for d in jax.devices()]
+    print(f"JAX backend: {backend}")
+    print(f"JAX devices: {devices}")
+except Exception as exc:
+    print(f"JAX runtime check failed: {exc}")
+    sys.exit(1)
+
+if expect_gpu and "gpu" not in devices and backend != "gpu":
+    print("GPU detected by system, but JAX is not using GPU.")
+    sys.exit(2)
+PY
+}
+
+ensure_jax_runtime() {
+  local expect_gpu=0
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    expect_gpu=1
+  fi
+
+  if jax_runtime_ok "${expect_gpu}"; then
+    return 0
+  fi
+
+  if (( AUTO_INSTALL_DEPS == 1 )); then
+    echo "Installing JAX runtime package: ${JAX_PIP_SPEC}"
+    "${PYTHON_BIN}" -m pip install "${JAX_PIP_SPEC}"
+    if ! jax_runtime_ok "${expect_gpu}"; then
+      echo "JAX runtime still not ready after install. Try setting JAX_PIP_SPEC manually." >&2
+      echo "Example: JAX_PIP_SPEC='jax[cuda12]' or JAX_PIP_SPEC='jax[cuda13]'" >&2
+      exit 3
+    fi
+  else
+    echo "JAX runtime check failed and auto-install is disabled." >&2
+    echo "Install manually with: ${PYTHON_BIN} -m pip install '${JAX_PIP_SPEC}'" >&2
+    exit 3
+  fi
+}
+
 if (( SHOW_SYSTEM_INFO == 1 )); then
   print_report_system_info
 fi
 
 if (( SKIP_PREFLIGHT == 0 )); then
-  reqs="jax:${JAX_PIP_SPEC},numpy:numpy,flax:flax,optax:optax,distrax:distrax,pandas:pandas,matplotlib:matplotlib,tqdm:tqdm,wandb:wandb,pygame:pygame,ocatari:ocatari"
-  if (( WITH_VIS == 1 )); then
-    reqs="${reqs},cv2:opencv-python"
-  fi
+  ensure_jax_runtime
+  reqs="jax:${JAX_PIP_SPEC},jaxlib:jaxlib,numpy:numpy,scipy:scipy,ml_dtypes:ml-dtypes,typing_extensions:typing-extensions,absl:absl-py,toolz:toolz,opt_einsum:opt-einsum,chex:chex,gymnax:gymnax,gymnasium:gymnasium,ale_py:ale-py,flax:flax,optax:optax,distrax:distrax,tensorflow_probability:tensorflow-probability,pandas:pandas,matplotlib:matplotlib,tqdm:tqdm,wandb:wandb,pygame:pygame,ocatari:ocatari,cv2:opencv-python,imageio:imageio,PIL:pillow,jinja2:jinja2,psutil:psutil,hydra:hydra-core,omegaconf:omegaconf,safetensors:safetensors"
   check_modules "${reqs}"
 fi
 
-if (( QUICK == 1 )); then
-  if [[ "${OBS_MODE}" == "object" ]]; then
-    PRESET="config_wizard_object_test"
+resolve_preset() {
+  local mode="$1"
+  if (( QUICK == 1 )); then
+    if [[ "${mode}" == "object" ]]; then
+      printf '%s\n' "config_wizard_object_test"
+    else
+      printf '%s\n' "config_wizard_pixel_test"
+    fi
+  elif (( MACSAFE == 1 )); then
+    if [[ "${mode}" == "object" ]]; then
+      printf '%s\n' "config_wizard_object_final_macsafe"
+    else
+      printf '%s\n' "config_wizard_pixel_final_macsafe"
+    fi
   else
-    PRESET="config_wizard_pixel_test"
+    if [[ "${mode}" == "object" ]]; then
+      printf '%s\n' "config_wizard_object_final"
+    else
+      printf '%s\n' "config_wizard_pixel_final"
+    fi
   fi
-elif (( MACSAFE == 1 )); then
-  if [[ "${OBS_MODE}" == "object" ]]; then
-    PRESET="config_wizard_object_final_macsafe"
-  else
-    PRESET="config_wizard_pixel_final_macsafe"
-  fi
+}
+
+PRESETS=()
+if [[ "${OBS_MODE}" == "both" ]]; then
+  PRESETS+=("$(resolve_preset object)")
+  PRESETS+=("$(resolve_preset pixel)")
 else
-  if [[ "${OBS_MODE}" == "object" ]]; then
-    PRESET="config_wizard_object_final"
-  else
-    PRESET="config_wizard_pixel_final"
-  fi
+  PRESETS+=("$(resolve_preset "${OBS_MODE}")")
 fi
 
 run_cmd() {
@@ -320,11 +391,25 @@ latest_ppo_model_path() {
   printf '%s\n' "${model}"
 }
 
+latest_ppo_result_dir() {
+  ls -td "${REPO_ROOT}"/results/ppo_distrax_jax_wizardofwor_* 2>/dev/null | head -n 1 || true
+}
+
+obs_mode_from_preset() {
+  local preset="$1"
+  if [[ "${preset}" == *object* ]]; then
+    printf '%s\n' "object"
+  else
+    printf '%s\n' "pixel"
+  fi
+}
+
 train_ppo() {
+  local preset="$1"
   local cmd=(
     "${PYTHON_BIN}" scripts/benchmarks/agent_performance_comparison.py
     --mode train-jaxatari \
-    --preset "${PRESET}" \
+    --preset "${preset}" \
     --env_type jax \
     --num_episodes "${NUM_EVAL_EPISODES}"
   )
@@ -346,33 +431,102 @@ train_ppo() {
   run_cmd "${cmd[@]}"
 }
 
-visualize_ppo_latest() {
-  local model
-  model="$(latest_ppo_model_path)" || {
-    echo "No trained PPO model found for visualization." >&2
-    return 1
-  }
+eval_ppo_model() {
+  local preset="$1"
+  local model="$2"
+  run_cmd "${PYTHON_BIN}" scripts/benchmarks/agent_performance_comparison.py \
+    --mode eval \
+    --preset "${preset}" \
+    --env_type jax \
+    --model_path "${model}" \
+    --num_episodes "${NUM_EVAL_EPISODES}"
+}
+
+visualize_ppo_model() {
+  local preset="$1"
+  local model="$2"
   run_cmd "${PYTHON_BIN}" scripts/benchmarks/agent_performance_comparison.py \
     --mode visualize \
-    --preset "${PRESET}" \
+    --preset "${preset}" \
     --env_type jax \
     --model_path "${model}" \
     --num_episodes "${NUM_VIS_EPISODES}"
 }
 
 echo "Wizard of Wor single-RL report runner"
-echo "algo=${ALGO}, obs=${OBS_MODE}, preset=${PRESET}"
+echo "algo=${ALGO}, obs=${OBS_MODE}, presets=${PRESETS[*]}"
 echo "quick=${QUICK}, macsafe=${MACSAFE}, rtx5090=${RTX5090_PROFILE}, with_visualize=${WITH_VIS}, skip_train=${SKIP_TRAIN}, dry_run=${DRY_RUN}"
 echo "JAX auto-install package: ${JAX_PIP_SPEC}"
 
+if (( DRY_RUN == 0 )); then
+  mkdir -p "${RESULTS_DIR}"
+  printf 'preset,obs_mode,result_dir,model_path\n' > "${RUN_MANIFEST_CSV}"
+  printf 'preset,obs_mode,stage,duration_seconds,result_dir\n' > "${RUN_TIMINGS_CSV}"
+fi
+
 if [[ "${ALGO}" == "ppo" ]]; then
-  if (( SKIP_TRAIN == 0 )); then
-    train_ppo
+  for preset in "${PRESETS[@]}"; do
+    obs_mode="$(obs_mode_from_preset "${preset}")"
+    echo ""
+    echo "=== PPO run for preset=${preset} ==="
+    if (( SKIP_TRAIN == 0 )); then
+      train_start="$(date +%s)"
+      train_ppo "${preset}"
+      train_end="$(date +%s)"
+      train_duration="$((train_end - train_start))"
+
+      if (( DRY_RUN == 1 )); then
+        result_dir="<latest_result_dir>"
+        model_path="<latest_ppo_model_params.npz>"
+      else
+        result_dir="$(latest_ppo_result_dir)"
+        if [[ -z "${result_dir}" ]]; then
+          echo "Could not locate latest PPO result directory after training." >&2
+          exit 3
+        fi
+        model_path="${result_dir}/ppo_distrax_model_params.npz"
+        [[ -f "${model_path}" ]] || {
+          echo "Missing model file after training: ${model_path}" >&2
+          exit 3
+        }
+        printf '%s,%s,%s,%s,%s\n' "${preset}" "${obs_mode}" "${result_dir}" "${model_path}" >> "${RUN_MANIFEST_CSV}"
+        printf '%s,%s,train,%s,%s\n' "${preset}" "${obs_mode}" "${train_duration}" "${result_dir}" >> "${RUN_TIMINGS_CSV}"
+      fi
+
+      eval_start="$(date +%s)"
+      eval_ppo_model "${preset}" "${model_path}"
+      eval_end="$(date +%s)"
+      eval_duration="$((eval_end - eval_start))"
+      if (( DRY_RUN == 0 )); then
+        printf '%s,%s,eval,%s,%s\n' "${preset}" "${obs_mode}" "${eval_duration}" "${result_dir}" >> "${RUN_TIMINGS_CSV}"
+      fi
+    fi
+    if (( WITH_VIS == 1 )); then
+      if (( DRY_RUN == 1 )); then
+        model_path="<latest_ppo_model_params.npz>"
+        result_dir="<latest_result_dir>"
+      elif [[ -z "${model_path:-}" ]]; then
+        result_dir="$(latest_ppo_result_dir)"
+        model_path="${result_dir}/ppo_distrax_model_params.npz"
+      fi
+      vis_start="$(date +%s)"
+      visualize_ppo_model "${preset}" "${model_path}"
+      vis_end="$(date +%s)"
+      vis_duration="$((vis_end - vis_start))"
+      if (( DRY_RUN == 0 )); then
+        printf '%s,%s,visualize,%s,%s\n' "${preset}" "${obs_mode}" "${vis_duration}" "${result_dir}" >> "${RUN_TIMINGS_CSV}"
+      fi
+    fi
+  done
+
+  if (( DRY_RUN == 0 )) && (( SKIP_TRAIN == 0 )); then
+    run_cmd "${PYTHON_BIN}" scripts/benchmarks/wizard_report.py \
+      --manifest-csv "${RUN_MANIFEST_CSV}" \
+      --timings-csv "${RUN_TIMINGS_CSV}" \
+      --output-dir "${REPORT_BUNDLE_DIR}"
+    echo "Report bundle generated at: ${REPORT_BUNDLE_DIR}"
   fi
-  if (( WITH_VIS == 1 )); then
-    visualize_ppo_latest
-  fi
-  echo "Wizard single-RL run complete (PPO)."
+  echo "Wizard RL run complete (PPO)."
   exit 0
 fi
 

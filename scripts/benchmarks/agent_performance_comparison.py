@@ -246,7 +246,12 @@ def train_ppo_agent_ocatari(config_dict: Dict[str, Any]) -> Tuple[TrainState, st
     
     # Save metrics as both npz and csv
     metrics_path_npz = os.path.join(results_dir, "training_metrics_ppo_distrax.npz")
-    np.savez(metrics_path_npz, **training_metrics)
+    metrics_to_save = {
+        k: np.asarray(v)
+        for k, v in training_metrics.items()
+        if isinstance(v, (list, tuple, np.ndarray))
+    }
+    np.savez(metrics_path_npz, **metrics_to_save)
     print(f"Training metrics saved to {metrics_path_npz}")
     
     # Save metrics as CSV for easier comparison
@@ -286,7 +291,12 @@ def train_ppo_agent_jaxatari(config_dict: Dict[str, Any]) -> Tuple[TrainState, s
     
     # Save metrics as both npz and csv
     metrics_path_npz = os.path.join(results_dir, "training_metrics_ppo_distrax.npz")
-    np.savez(metrics_path_npz, **training_metrics)
+    metrics_to_save = {
+        k: np.asarray(v)
+        for k, v in training_metrics.items()
+        if isinstance(v, (list, tuple, np.ndarray))
+    }
+    np.savez(metrics_path_npz, **metrics_to_save)
     print(f"Training metrics saved to {metrics_path_npz}")
     
     # Save metrics as CSV for easier comparison
@@ -300,6 +310,16 @@ def train_ppo_agent_jaxatari(config_dict: Dict[str, Any]) -> Tuple[TrainState, s
     metrics_path_csv = os.path.join(results_dir, "training_metrics_ppo_distrax.csv")
     metrics_df.to_csv(metrics_path_csv, index=False)
     print(f"Training metrics saved to {metrics_path_csv}")
+
+    timing_summary = training_metrics.get("timing_summary")
+    if isinstance(timing_summary, dict):
+        timing_json_path = os.path.join(results_dir, "training_timing_summary.json")
+        timing_csv_path = os.path.join(results_dir, "training_timing_summary.csv")
+        with open(timing_json_path, "w", encoding="utf-8") as fh:
+            json.dump(timing_summary, fh, indent=2)
+        pd.DataFrame([timing_summary]).to_csv(timing_csv_path, index=False)
+        print(f"Training timing saved to {timing_json_path}")
+        print(f"Training timing saved to {timing_csv_path}")
     
     return trained_ppo_state, results_dir, training_metrics
 

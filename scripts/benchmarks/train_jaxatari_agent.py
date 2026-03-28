@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
+import time
 from typing import Dict, Any, Tuple, List, Callable
 from collections import deque
 from tqdm import tqdm
@@ -325,8 +326,11 @@ def train_ppo_with_jaxatari(config: Dict[str, Any]):
 
     # Create progress bar for overall training
     pbar = tqdm(total=config["NUM_UPDATES"], desc="Training Progress", position=0)
+    train_wall_start = time.time()
+    update_wall_times: List[float] = []
 
     for update_idx in range(1, config["NUM_UPDATES"] + 1):
+        update_wall_start = time.time()
         agent_key, rollout_sample_key, update_perm_key = jax.random.split(agent_key, 3)
 
         # Create progress bar for rollout steps
@@ -487,6 +491,7 @@ def train_ppo_with_jaxatari(config: Dict[str, Any]):
                     wandb_metrics["clip_fraction"] = aux_info_dict["clip_fraction"]
                 wandb.log(wandb_metrics, step=current_total_steps_log)
 
+        update_wall_times.append(time.time() - update_wall_start)
         pbar.update(1)
 
     pbar.close()
@@ -495,13 +500,39 @@ def train_ppo_with_jaxatari(config: Dict[str, Any]):
     if use_wandb:
         wandb.finish()
 
+    total_wall_time_sec = float(time.time() - train_wall_start)
+    if update_wall_times:
+        first_update_sec = float(update_wall_times[0])
+        if len(update_wall_times) > 1:
+            steady_update_sec = float(np.mean(update_wall_times[1:]))
+        else:
+            steady_update_sec = first_update_sec
+        estimated_compile_sec = float(max(0.0, first_update_sec - steady_update_sec))
+    else:
+        first_update_sec = 0.0
+        steady_update_sec = 0.0
+        estimated_compile_sec = 0.0
+    estimated_runtime_sec = float(max(0.0, total_wall_time_sec - estimated_compile_sec))
+    timing_summary = {
+        "total_wall_time_sec": total_wall_time_sec,
+        "estimated_compile_sec": estimated_compile_sec,
+        "estimated_runtime_sec": estimated_runtime_sec,
+        "first_update_sec": first_update_sec,
+        "steady_update_sec": steady_update_sec,
+        "mean_update_sec": float(np.mean(update_wall_times)) if update_wall_times else 0.0,
+        "num_updates": int(config["NUM_UPDATES"]),
+        "total_timesteps": int(config["TOTAL_TIMESTEPS"]),
+        "estimated_steps_per_sec": float(config["TOTAL_TIMESTEPS"] / max(estimated_runtime_sec, 1e-9)),
+    }
+
     training_results_metrics = {
         "timesteps": all_timesteps_history,
         "mean_rewards": all_mean_rewards_history,
         "pg_losses": all_pg_loss_hist,
         "vf_losses": all_vf_loss_hist,
         "ent_losses": all_ent_hist,
-        "all_episode_rewards": all_episode_rewards_history
+        "all_episode_rewards": all_episode_rewards_history,
+        "timing_summary": timing_summary,
     }
 
     return train_state, training_results_metrics
