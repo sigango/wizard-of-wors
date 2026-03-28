@@ -331,12 +331,35 @@ ensure_jax_runtime() {
   fi
 }
 
+ensure_ocatari_runtime() {
+  if (( AUTO_INSTALL_DEPS != 1 )); then
+    return 0
+  fi
+
+  echo "Ensuring OCAtari is installed..."
+  if "${PYTHON_BIN}" -m pip install -U ocatari; then
+    return 0
+  fi
+
+  echo "OCAtari wheel install failed, trying source install from GitHub..."
+  if "${PYTHON_BIN}" -m pip install -U "git+https://github.com/k4ntz/OC_Atari.git"; then
+    return 0
+  fi
+
+  echo "Failed to install OCAtari automatically." >&2
+  echo "Please install manually, for example:" >&2
+  echo "  ${PYTHON_BIN} -m pip install -U ocatari" >&2
+  echo "  ${PYTHON_BIN} -m pip install -U git+https://github.com/k4ntz/OC_Atari.git" >&2
+  exit 3
+}
+
 if (( SHOW_SYSTEM_INFO == 1 )); then
   print_report_system_info
 fi
 
 if (( SKIP_PREFLIGHT == 0 )); then
   ensure_jax_runtime
+  ensure_ocatari_runtime
   reqs="jax:${JAX_PIP_SPEC},jaxlib:jaxlib,numpy:numpy,scipy:scipy,ml_dtypes:ml-dtypes,typing_extensions:typing-extensions,absl:absl-py,toolz:toolz,opt_einsum:opt-einsum,chex:chex,gymnax:gymnax,gymnasium:gymnasium,ale_py:ale-py,flax:flax,optax:optax,distrax:distrax,tensorflow_probability:tensorflow-probability,pandas:pandas,matplotlib:matplotlib,tqdm:tqdm,wandb:wandb,pygame:pygame,ocatari:ocatari,cv2:opencv-python,imageio:imageio,PIL:pillow,jinja2:jinja2,psutil:psutil,hydra:hydra-core,omegaconf:omegaconf,safetensors:safetensors"
   check_modules "${reqs}"
 fi
